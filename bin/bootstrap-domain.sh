@@ -32,7 +32,7 @@ ROOT_DOMAIN="$2"
 CERT_NAME=$(echo "$DOMAIN" | tr '.' '-' | sed 's/$/-auto/')
 RR=$(echo "$DOMAIN" | sed "s/\.${ROOT_DOMAIN}$//")
 
-ACCOUNT_ID=$(aliyun sts GetCallerIdentity --region cn-shanghai 2>/dev/null \
+ACCOUNT_ID=$(aliyun sts GetCallerIdentity --profile fc --region cn-shanghai 2>/dev/null \
   | python3 -c "import sys,json; print(json.load(sys.stdin)['AccountId'])")
 
 FC_GATEWAY="${ACCOUNT_ID}.cn-shanghai.fc.aliyuncs.com"
@@ -55,7 +55,9 @@ echo "[1/3] 签 Let's Encrypt 证书..."
 # 2. 上传到 CAS
 echo ""
 echo "[2/3] 上传到阿里云 CAS..."
-aic aliyun-cert:upload "$CERT_NAME" "$DOMAIN" \
+# 用 enterprise profile — dns user 有 CAS 写权限
+# 注意: aic aliyun-cert:upload 签名是 <name> <certFile> <keyFile>, 不需要 <domain>
+aic aliyun-cert:upload -p enterprise "$CERT_NAME" \
   "$HOME/.acme.sh/$DOMAIN/fullchain.cer" \
   "$HOME/.acme.sh/$DOMAIN/$DOMAIN.key" || {
   echo "ERROR: 上传 CAS 失败 (可能已存在同名证书, 可忽略)"

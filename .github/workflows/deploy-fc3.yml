@@ -19,7 +19,7 @@ name: Deploy to FC3 (Reusable)
 # The repo must have a deploy/fc/s.yaml + deploy/fc/server/bootstrap pattern; see
 # daifuyang/dock for a minimal reference.
 
-on:
+"on":
   workflow_call:
     inputs:
       function_name:
