@@ -1,0 +1,26 @@
+{
+  "Version": "1",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Federated": [
+          "acs:ram::1650595695532785:oidc-provider/github-actions"
+        ]
+      },
+      "Action": "sts:AssumeRole",
+      "Condition": {
+        "StringEquals": {
+          "oidc:iss": "https://token.actions.githubusercontent.com",
+          "oidc:aud": "github-actions"
+        },
+        "StringLike": {
+          "oidc:sub": [
+            "repo:daifuyang/*:ref:refs/heads/main",
+            "repo:daifuyang/*:ref:refs/tags/*"
+          ]
+        }
+      }
+    }
+  ]
+}

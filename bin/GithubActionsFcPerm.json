@@ -1,0 +1,51 @@
+{
+  "Version": "1",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "fc:Create*",
+        "fc:Update*",
+        "fc:Get*",
+        "fc:List*",
+        "fc:Describe*",
+        "fc:Invoke*",
+        "fc:Delete*"
+      ],
+      "Resource": "acs:fc:cn-shanghai:1650595695532785:*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "fc:Create*",
+        "fc:Update*",
+        "fc:Get*",
+        "fc:List*",
+        "fc:Describe*",
+        "fc:Delete*"
+      ],
+      "Resource": "acs:fc:cn-shanghai:*:domain/*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "fc:Create*",
+        "fc:Update*",
+        "fc:Get*",
+        "fc:List*",
+        "fc:Describe*",
+        "fc:Delete*"
+      ],
+      "Resource": "acs:fc:cn-shanghai:*:trigger/*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "vpc:DescribeVpc",
+        "vpc:DescribeVSwitches",
+        "vpc:DescribeSecurityGroup"
+      ],
+      "Resource": "*"
+    }
+  ]
+}

@@ -1,0 +1,181 @@
+name: fc-deploy-env
+
+description: |
+  OIDC-federated STS access for daifuyang/* FC3 deploys (shared role).
+  Pipeline:
+    1. requests GitHub OIDC token (audience=github-actions)
+    2. exchanges it via aliyun sts AssumeRoleWithOIDC for a 1-hour STS triplet
+    3. writes ~/.s/access.yaml under the alias supplied via `profile-name` input
+       (default `default`, matching deploy/fc/s.yaml `access: default`)
+  Notes:
+    - Uses shared role `GithubActionsFcDeployer` (org-wide trust: daifuyang/*).
+    - Audience is fixed to `github-actions` (single ClientId shared across org).
+
+inputs:
+  role-arn:
+    description: |
+      Aliyun RAM role ARN. Convention: GithubActionsFcDeployer in the daifuyang aliyun account.
+      e.g. acs:ram::1650595695532785:role/GithubActionsFcDeployer
+    required: true
+  audience:
+    description: |
+      OIDC `aud` claim. Single shared value across the org: `github-actions`.
+      Must match the ClientIds list on the OIDC IdP.
+    required: false
+    default: github-actions
+  account-id:
+    description: "Aliyun AccountID used in the s CLI access.yaml profile"
+    required: false
+    default: "1650595695532785"
+  region:
+    description: "Region for the STS AssumeRoleWithOIDC endpoint"
+    required: false
+    default: cn-hangzhou
+  oidc-provider-arn:
+    description: "Aliyun OIDC IdP ARN"
+    required: false
+    default: 'acs:ram::1650595695532785:oidc-provider/github-actions'
+  profile-name:
+    description: "s CLI access profile alias (matches s.yaml's `access`). Convention: use `default`."
+    required: false
+    default: default
+
+outputs:
+  access-key-id:
+    description: "STS SessionAccessKeyId"
+    value: ${{ steps.sts.outputs.access_key_id }}
+  access-key-secret:
+    description: "STS SessionAccessKeySecret"
+    value: ${{ steps.sts.outputs.access_key_secret }}
+  security-token:
+    description: "STS SecurityToken"
+    value: ${{ steps.sts.outputs.security_token }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install aliyun CLI
+      shell: bash
+      run: |
+        set -euo pipefail
+        curl -fsSL "https://aliyuncli.alicdn.com/aliyun-cli-linux-3.0.182-amd64.tgz" \
+          -o /tmp/aliyun.tgz
+        tar -xzf /tmp/aliyun.tgz -C /tmp
+        if [ -f /tmp/aliyun ]; then sudo mv /tmp/aliyun /usr/local/bin/aliyun; fi
+        aliyun --version
+
+        # aliyun CLI SDK refuses to start without a configured profile, even though the
+        # AssumeRoleWithOIDC call itself only uses the OIDC token. Seed a placeholder
+        # AK profile so its credential chain validates; the real auth is the JWT below.
+        mkdir -p ~/.aliyun
+        cat >~/.aliyun/config.json <<EOF
+        {
+          "current": "fcdeploy",
+          "profiles": [
+            {
+              "name": "fcdeploy",
+              "mode": "AK",
+              "access_key_id": "placeholder-ak",
+              "access_key_secret": "placeholder-sk",
+              "sts_token": "",
+              "ram_role_name": "",
+              "ram_role_arn": "",
+              "private_key": "",
+              "key_pairs_cmd": "",
+              "key_pairs_dir": "",
+              "language": "en",
+              "site": "",
+              "retry_timeout": 0,
+              "retry_count": 0,
+              "process_command": "",
+              "credentials_uri": "",
+              "oidc_provider_arn": "",
+              "oidc_token_file": "",
+              "external_id": "",
+              "using_oidc": false,
+              "oidc_token_endpoint": "",
+              "ram_role_session_name": "",
+              "expiration": "",
+              "region_id": "cn-hangzhou",
+              "output_format": "json",
+              "timeout": 0,
+              "insecure": false,
+              "ssl_verify": true
+            }
+          ],
+          "meta_path": ""
+        }
+        EOF
+        chmod 600 ~/.aliyun/config.json
+
+    - name: Fetch GitHub OIDC token
+      id: oidc
+      shell: bash
+      env:
+        AUDIENCE: ${{ inputs.audience }}
+      run: |
+        set -euo pipefail
+        TOKEN=$(curl -fsS \
+          -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+          "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${AUDIENCE}" \
+          | jq -r '.value')
+        if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
+          echo "::error::Failed to fetch GitHub OIDC token (empty response)"
+          exit 1
+        fi
+        echo "oidc_token_length=${#TOKEN}" >>"$GITHUB_OUTPUT"
+        echo -n "$TOKEN" >/tmp/oidc.jwt
+
+    - name: Assume RAM role via AssumeRoleWithOIDC
+      id: sts
+      shell: bash
+      env:
+        ROLE_ARN: ${{ inputs.role-arn }}
+        REGION: ${{ inputs.region }}
+        OIDC_PROVIDER_ARN: ${{ inputs.oidc-provider-arn }}
+        OIDC_TOKEN_FILE: /tmp/oidc.jwt
+        ROLE_SESSION_NAME: gha-${{ github.run_id }}-${{ github.event.pull_request.number || github.sha }}
+      run: |
+        set -euo pipefail
+        OIDC_TOKEN=$(cat "$OIDC_TOKEN_FILE")
+        RESP=$(aliyun sts AssumeRoleWithOIDC \
+          --region "$REGION" \
+          --RoleArn "$ROLE_ARN" \
+          --OIDCProviderArn "$OIDC_PROVIDER_ARN" \
+          --OIDCToken "$OIDC_TOKEN" \
+          --RoleSessionName "$ROLE_SESSION_NAME" \
+          --DurationSeconds 3600)
+        AK=$(echo "$RESP"  | jq -r '.Credentials.AccessKeyId')
+        SK=$(echo "$RESP"  | jq -r '.Credentials.AccessKeySecret')
+        TOK=$(echo "$RESP" | jq -r '.Credentials.SecurityToken')
+        if [ -z "$AK" ] || [ "$AK" = "null" ]; then
+          echo "::error::AssumeRoleWithOIDC returned no STS credentials; full response:"
+          echo "$RESP"
+          exit 1
+        fi
+        echo "access_key_id=${AK}"     >>"$GITHUB_OUTPUT"
+        echo "access_key_secret=${SK}" >>"$GITHUB_OUTPUT"
+        echo "security_token=${TOK}"   >>"$GITHUB_OUTPUT"
+        rm -f /tmp/oidc.jwt
+
+    - name: Write Serverless Devs profile (STS, scoped)
+      shell: bash
+      env:
+        PROFILE: ${{ inputs.profile-name }}
+        ACCOUNT_ID: ${{ inputs.account-id }}
+        AK: ${{ steps.sts.outputs.access_key_id }}
+        SK: ${{ steps.sts.outputs.access_key_secret }}
+        TOK: ${{ steps.sts.outputs.security_token }}
+      run: |
+        set -euo pipefail
+        mkdir -p ~/.s
+        cat >~/.s/access.yaml <<EOF
+        ${PROFILE}:
+          AccessKeyID: ${AK}
+          AccessKeySecret: ${SK}
+          SecurityToken: ${TOK}
+          type: sts
+          AccountID: '${ACCOUNT_ID}'
+          __provider: Alibaba Cloud
+        EOF
+        chmod 600 ~/.s/access.yaml
