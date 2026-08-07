@@ -1,19 +1,156 @@
 name: Deploy to FC3 (Reusable)
 
+# Generic reusable workflow for any daifuyang/* repo deploying to Alibaba Cloud FC3.
+# Trust model: shared role `GithubActionsFcDeployer` (org-wide).
+# Call from any repo's workflow:
+#
+#   "on":
+#     push: { branches: [main] }
+#   jobs:
+#     deploy:
+#       uses: daifuyang/.github/.github/workflows/deploy-fc3.yml@main
+#       with:
+#         function_name: my-app
+#         custom_domain: my-app.zerocmf.com
+#         cert_name: my-app-zerocmf-com-auto
+#       secrets: inherit
+#
+# Inputs describe the *resource naming* only. Build is done via `pnpm build` (or `npm run build`).
+# The repo must have a deploy/fc/s.yaml + deploy/fc/server/bootstrap pattern; see
+# daifuyang/dock for a minimal reference.
+
 "on":
   workflow_call:
     inputs:
       function_name:
+        description: "FC3 function name (also used as s.yaml `vars.functionName`)"
         required: true
         type: string
-    secrets:
-      FC_DEPLOY_ROLE_ARN:
+      custom_domain:
+        description: "HTTPS domain the function will be routed to (must already have a CNAME → FC gateway)"
         required: true
+        type: string
+      cert_name:
+        description: "Aliyun CAS certificate name (form: <domain . 改 ->), e.g. mp-zerocmf-com-auto"
+        required: true
+        type: string
+      description:
+        description: "FC3 function description shown in console"
+        required: false
+        type: string
+        default: "TanStack Start app"
+      memory_size:
+        description: "FC3 memory (MB)"
+        required: false
+        type: string
+        default: "1024"
+      timeout:
+        description: "FC3 timeout (s)"
+        required: false
+        type: string
+        default: "60"
+      runtime:
+        description: "FC3 custom runtime"
+        required: false
+        type: string
+        default: "custom.debian12"
+      build_command:
+        description: "Build command (must produce dist/ for TanStack Start)"
+        required: false
+        type: string
+        default: "pnpm install --frozen-lockfile && pnpm build"
+      stage_command:
+        description: "Stage command (copy dist/ into deploy/fc/code/)"
+        required: false
+        type: string
+        default: "node scripts/build-fc.mjs"
+      smoke_path:
+        description: "URL path to curl after deploy for smoke test"
+        required: false
+        type: string
+        default: "/"
+      smoke_url_override:
+        description: "Override smoke URL entirely (e.g. fcapp.run before DNS cutover). If empty, uses https://<custom_domain><smoke_path>"
+        required: false
+        type: string
+        default: ""
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write   # required for OIDC
+
     steps:
-      - name: Echo input
-        run: echo "function=${{ inputs.function_name }}"
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install Serverless Devs
+        run: npm install -g @serverless-devs/s
+
+      - name: Assume FC deploy role via OIDC (shared)
+        uses: daifuyang/.github/actions/fc-deploy-env@main
+        with:
+          role-arn: ${{ secrets.FC_DEPLOY_ROLE_ARN }}
+
+      - name: Build
+        run: ${{ inputs.build_command }}
+
+      - name: Stage deploy/fc/code
+        run: ${{ inputs.stage_command }}
+
+      - name: Deploy via Serverless Devs
+        env:
+          FUNCTION_NAME: ${{ inputs.function_name }}
+          CUSTOM_DOMAIN: ${{ inputs.custom_domain }}
+          CERT_NAME: ${{ inputs.cert_name }}
+          DESCRIPTION: ${{ inputs.description }}
+          MEMORY_SIZE: ${{ inputs.memory_size }}
+          TIMEOUT: ${{ inputs.timeout }}
+          RUNTIME: ${{ inputs.runtime }}
+        run: |
+          set -euo pipefail
+          # Substitute placeholders in s.yaml so the repo doesn't hardcode the function name
+          # (matches DocBase's pattern: vars.functionName / vars.customDomain / vars.certName).
+          python3 - <<PY
+          import os, pathlib, re
+          p = pathlib.Path("deploy/fc/s.yaml")
+          t = p.read_text()
+          for k, v in {
+            "<FUNCTION_NAME>": os.environ["FUNCTION_NAME"],
+            "<CUSTOM_DOMAIN>": os.environ["CUSTOM_DOMAIN"],
+            "<CERT_NAME>": os.environ["CERT_NAME"],
+            "<DESCRIPTION>": os.environ["DESCRIPTION"],
+            "<MEMORY_SIZE>": os.environ["MEMORY_SIZE"],
+            "<TIMEOUT>": os.environ["TIMEOUT"],
+            "<RUNTIME>": os.environ["RUNTIME"],
+          }.items():
+              t = t.replace(k, v)
+          p.write_text(t)
+          PY
+          python3 -c 'import yaml; yaml.safe_load(open("deploy/fc/s.yaml"))'
+          s -y
+
+      - name: Smoke test
+        if: ${{ always() }}
+        env:
+          SMOKE_URL: ${{ inputs.smoke_url_override || format('https://{0}{1}', inputs.custom_domain, inputs.smoke_path) }}
+        run: |
+          set -euo pipefail
+          # Wait up to 30s for cold start
+          for i in 1 2 3 4 5 6; do
+            CODE=$(curl -ksS -o /dev/null -w "%{http_code}" --max-time 5 "$SMOKE_URL" || echo 000)
+            echo "smoke attempt $i: HTTP $CODE ($SMOKE_URL)"
+            if [ "$CODE" -ge 200 ] && [ "$CODE" -lt 500 ]; then
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::smoke test failed after 30s"
+          exit 1
