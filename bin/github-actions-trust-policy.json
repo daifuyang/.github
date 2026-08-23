@@ -16,8 +16,8 @@
         },
         "StringLike": {
           "oidc:sub": [
-            "repo:daifuyang/*:ref:refs/heads/main",
-            "repo:daifuyang/*:ref:refs/tags/*"
+            "repo:daifuyang@*/*@*:ref:refs/heads/main",
+            "repo:daifuyang@*/*@*:ref:refs/tags/*"
           ]
         }
       }
