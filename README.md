@@ -45,8 +45,13 @@ bin/
 
 - **Single OIDC IdP** `github-actions` (per aliyun account, created once)
 - **Single ClientId** `github-actions` (not per-repo)
-- **Single RAM role** `GithubActionsFcDeployer` with trust policy
-  `repo:daifuyang/*:ref:refs/heads/main` + `refs/tags/*`
+- **Single RAM role** `GithubActionsFcDeployer` with owner-scoped trust:
+  `repo:daifuyang/*` (legacy subjects) and `repo:daifuyang@*/*`
+  (subjects containing immutable owner/repository IDs).
+- **Deployment triggers belong to each repository**: the shared role allows
+  all branches (including `main` and `all`), tags, and environments under
+  `daifuyang`. Each repository configures its workflow triggers and any
+  environment protection rules; the shared workflow does not filter branches.
 - **Single permission policy** `GithubActionsFcPerm` (`fc:*` + `vpc:Describe*`)
 - **All daifuyang repos share the same deploy capability** but with
   per-function isolation through naming (`<repo>-*` function names)
@@ -98,6 +103,21 @@ If you need to redo this in a new aliyun account:
 ```
 
 It is idempotent (checks for existing resources before creating).
+
+The trust policy source is `bin/github-actions-trust-policy.json`. Committing
+this file does not apply it to Alibaba Cloud. To update only the existing
+shared role, run the following with an authorized Alibaba Cloud CLI profile
+from this repository in Bash, then verify the returned policy:
+
+```bash
+aliyun ram UpdateRole \
+  --RoleName GithubActionsFcDeployer \
+  --NewAssumeRolePolicyDocument "$(cat bin/github-actions-trust-policy.json)"
+aliyun ram GetRole --RoleName GithubActionsFcDeployer
+```
+
+The shared workflow reference `@main` selects the version of this repository;
+it does not require the calling repository to deploy from `main`.
 
 ## References
 
